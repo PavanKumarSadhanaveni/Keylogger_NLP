@@ -1,7 +1,8 @@
 import React from 'react';
 import KeylogWords from './KeylogWords'; // Import the component
+(global as any).random = Math.random;
 
-function App() {
+const App: React.FC = () => {
   return (
     <div className="App">
       <KeylogWords />
