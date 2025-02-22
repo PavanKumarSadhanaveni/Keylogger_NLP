@@ -1,13 +1,20 @@
-from flask import Flask, request, jsonify
-from pymongo import MongoClient
+from flask import Flask, request, jsonify, Response
+from pymongo import MongoClient, DESCENDING
 from bson.json_util import dumps
 from datetime import datetime, timedelta, timezone
 from flask_cors import CORS
 import re
 from typing import List, Dict
+import gridfs
+from bson import ObjectId
+from io import BytesIO
+from flask import send_file
+import queue
+import time
+import json
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"])  # Allow all for SSE
 
 # MongoDB Configuration
 MONGO_URI = "mongodb://localhost:27017/"
@@ -16,12 +23,15 @@ DATABASE_NAME = "keylogger_db"
 client = MongoClient(MONGO_URI)
 db = client[DATABASE_NAME]
 words_collection = db["keylogs"]
+fs = gridfs.GridFS(db)
 
 KEY_REGEX = re.compile(r'\[.*?\]')
 # print(KEY_REGEX.split("This is a [test] string with [multiple] matches."))
 KEY_PREFIX = "Key"
 MODIFIER_KEYS = ["Ctrl", "Shift", "Alt", "Meta", "Control", "Super"] # You may need to modify this list based on your needs
 
+# --- SSE Queue ---
+event_queue = queue.Queue()
 
 def _parse_date(date_str: str) -> datetime:
     """Helper function to parse date strings with timezone to UTC"""
@@ -122,6 +132,121 @@ def get_wordcloud():
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({"error": "Failed to retrieve words"}), 500
-    
+
+@app.route('/api/fuzzy-matches', methods=['GET'])
+def get_fuzzy_matches():
+    try:
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+
+        if not start_date_str or not end_date_str:
+            return jsonify({"error": "Start and end dates are required"}), 400
+
+        start_date, end_date = _get_date_range(start_date_str, end_date_str)
+        print(f"Received request for fuzzy matches between {start_date} and {end_date}")
+
+        query = {
+            'timestamp': {
+                '$gte': start_date,
+                '$lt': end_date
+            },
+            'flags': 'fuzzy_match'
+        }
+        cursor = words_collection.find(query).sort("timestamp", DESCENDING)
+        matches = list(cursor)
+
+        response_data = []
+        for match in matches:
+            match_data = {}
+
+            # Safely get timestamp
+            if 'timestamp' in match:
+                match_data['timestamp'] = match['timestamp']
+            else:
+                match_data['timestamp'] = None  # Or some default value
+
+            # Safely get userId
+            if 'userId' in match:
+                match_data['userId'] = match['userId']
+            else:
+                match_data['userId'] = None
+
+            # Safely get flaggedWord
+            if 'eventData' in match and 'key' in match['eventData']:
+                match_data['flaggedWord'] = match['eventData']['key']
+            else:
+                match_data['flaggedWord'] = None
+
+            # Safely get flagged_word_similar_to
+            if 'flagged_word_similar_to' in match:
+                # Handle the case where it's a list (as intended)
+                if isinstance(match['flagged_word_similar_to'], list) and match['flagged_word_similar_to']:
+                    match_data['flagged_word_similar_to'] = match['flagged_word_similar_to'][0]
+                else:
+                    match_data['flagged_word_similar_to'] = None
+            else:
+                match_data['flagged_word_similar_to'] = None
+
+
+            # Safely get screenshot URL
+            if 'screenshot_data' in match and 'screenshot_id' in match['screenshot_data']:
+                screenshot_id = match['screenshot_data']['screenshot_id']
+                match_data['screenshot_url'] = f"/api/screenshots/{screenshot_id}"
+            else:
+                match_data['screenshot_url'] = None
+
+            response_data.append(match_data)
+
+        print(f"Retrieved {len(response_data)} fuzzy matches from MongoDB")
+        return jsonify(response_data)
+
+    except ValueError as ve:
+        print(f"Error parsing date strings: {ve}")
+        return jsonify({"error": "Invalid date format"}), 400
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({"error": "Failed to retrieve fuzzy matches"}), 500
+
+@app.route('/api/screenshots/<screenshot_id>', methods=['GET'])
+def get_screenshot(screenshot_id):
+    """Retrieves a screenshot by its GridFS ID and serves it as a file."""
+    print(f"attempting to get screenshot: {screenshot_id}")
+    try:
+        image_data = fs.get(ObjectId(screenshot_id)).read()
+        return send_file(BytesIO(image_data), mimetype='image/png')
+    except Exception as e:
+        print(f"Error retrieving screenshot: {e}")
+        return jsonify({"error": "Failed to retrieve screenshot"}), 404
+
+# --- SSE Stream ---
+@app.route('/api/stream')
+def stream():
+    def generate():
+        while True:
+            event = event_queue.get()  # Wait for an event
+            yield f"data: {json.dumps(event)}\n\n"  # Format as SSE
+            time.sleep(1) # Prevents the loop from spinning too fast
+
+    return Response(generate(), mimetype='text/event-stream')
+
+# --- Notification Push (called by main.py) ---
+@app.route('/api/push_notification', methods=['POST']) # Changed to a route
+def push_notification():
+    data = request.get_json()
+    flagged_word = data.get('flagged_word')
+    user_id = data.get('user_id')
+    screenshot_url = data.get('screenshot_url')
+
+    if not all([flagged_word, user_id]):
+        return jsonify({'error': 'Missing data'}), 400
+
+    event = {
+        "flaggedWord": flagged_word,
+        "userId": user_id,
+        "screenshotUrl": screenshot_url
+    }
+    event_queue.put(event)  # Put the event into the queue
+    return jsonify({'status': 'success'}), 200
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    app.run(debug=True, host='0.0.0.0', threaded=True) # Important: threaded=True for SSE

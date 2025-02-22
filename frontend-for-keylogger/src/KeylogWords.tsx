@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
 import DatePicker from "react-date-picker";
 import "react-date-picker/dist/DatePicker.css";
@@ -12,6 +12,14 @@ import 'bootstrap/dist/css/bootstrap.min.css'; // Import Bootstrap CSS
 interface Word {
   text: string;
   value: number;
+}
+
+interface FuzzyMatch {
+  timestamp: string;
+  userId: string;
+  flaggedWord: string;
+  screenshot_url: string | null;
+  flagged_word_similar_to: string;
 }
 
 interface KeylogWordsProps {
@@ -28,11 +36,31 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
   const [error, setError] = useState<string | null>(null);
   const [wordCloud, setWordCloud] = useState<Word[]>([]);
 
+  // Fuzzy Matches and Lazy Loading
+  const [fuzzyMatches, setFuzzyMatches] = useState<FuzzyMatch[]>([]);
+  const [hasMore, setHasMore] = useState(true); // For infinite scroll
+  const [page, setPage] = useState(0);         // Page number for lazy loading
+  const [loadingFuzzyMatches, setLoadingFuzzyMatches] = useState(false);
+
+  const observer = useRef<IntersectionObserver | null>(null); // Intersection Observer for lazy loading
+
+  const lastMatchElementRef = useCallback((node: HTMLLIElement | null) => {
+    if (loadingFuzzyMatches) return;
+    if (observer.current) observer.current.disconnect();
+    observer.current = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && hasMore) {
+        setPage(prevPage => prevPage + 1); // Load next page
+      }
+    });
+    if (node) observer.current.observe(node);
+  }, [loadingFuzzyMatches, hasMore]);
+
+
   const fetchWords = async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.get("http://localhost:5000/api/words", {
+      const response = await axios.get("/api/words", { // Use relative URL
         params: {
           startDate: startDate.toISOString(),
           endDate: endDate.toISOString(),
@@ -52,7 +80,7 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.get("http://localhost:5000/api/wordcloud", {
+      const response = await axios.get("/api/wordcloud", { // Use relative URL
         params: {
           startDate: startDate.toISOString(),
           endDate: endDate.toISOString(),
@@ -68,75 +96,163 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
     }
   };
 
+  const fetchFuzzyMatches = async () => {
+      if (!hasMore || loadingFuzzyMatches) return; // Prevent multiple calls
+
+      setLoadingFuzzyMatches(true);
+      setError(null);
+      try {
+          const response = await axios.get("/api/fuzzy-matches", { // Use relative URL
+              params: {
+                  startDate: startDate.toISOString(),
+                  endDate: endDate.toISOString(),
+                  cacheBuster: Date.now(),
+              },
+          });
+
+          const newMatches = response.data as FuzzyMatch[];
+
+          if (newMatches.length === 0) {
+              setHasMore(false); // No more data to load
+          }
+
+          setFuzzyMatches(prevMatches => {
+              const allMatches = [...prevMatches, ...newMatches];
+              const uniqueMatchesMap = new Map(allMatches.map(match => [match.timestamp, match]));
+              const uniqueMatches = Array.from(uniqueMatchesMap.values()).sort(
+                  (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+              );
+              return uniqueMatches;
+          });
+
+      } catch (err: any) {
+          setError("Error fetching fuzzy matches. Please try again later.");
+          console.error(err);
+      } finally {
+          setLoadingFuzzyMatches(false);
+      }
+  };
+
+    useEffect(() => {
+        // Listen for SSE events
+        const eventSource = new EventSource('/api/stream');
+
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log("Received SSE event:", data);
+
+            // Display a notification (even if the app is in the background,
+            // the service worker will handle it)
+            if (Notification.permission === 'granted') {
+                const notificationTitle = `Offensive word detected: ${data.flaggedWord}`;
+                const notificationOptions = {
+                    body: `User: ${data.userId}\nClick to view.`, // Removed screenshot mention
+                    // icon: data.screenshotUrl, // Removed icon
+                    data: { url: "/" }, // Pass root URL for click handling
+                };
+
+                navigator.serviceWorker.ready.then(registration => {
+                    registration.showNotification(notificationTitle, notificationOptions);
+                });
+            }
+        };
+
+        eventSource.onerror = (error) => {
+            console.error("EventSource failed:", error);
+            eventSource.close();
+        };
+
+        // Clean up the EventSource when the component unmounts
+        return () => {
+            eventSource.close();
+        };
+    }, []); // Empty dependency array: run only once on mount
+
+
   useEffect(() => {
     fetchWords();
     fetchFreqForWordCloud(); // Fetch word cloud data on date change as well
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]); // Re-fetch when dates change
 
+  useEffect(() => {
+      setFuzzyMatches([]); // Clear previous matches when dates change
+      setPage(0);
+      setHasMore(true);
+      fetchFuzzyMatches();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate, endDate]); // Reset and re-fetch fuzzy matches when dates change
+
+  useEffect(() => {
+    if (page > 0) { // Only fetch more if page > 0 (avoid initial double fetch)
+        fetchFuzzyMatches();
+    }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]); // Fetch more matches when page changes
+
 
   return (
-    <div className="container mt-4"> {/* Bootstrap container for padding and responsiveness */}
-      <h1 className="mb-4">Keylogged Words</h1> {/* Increased bottom margin */}
+    <div className="container mt-4">
+      <h1>Keylogged Words</h1>
 
-      <div className="row mb-3"> {/* Bootstrap row for date pickers */}
-        <div className="col-md-6"> {/* Adjust column size as needed */}
-          <div className="form-group"> {/* Bootstrap form group for labels and inputs */}
-            <label htmlFor="startDate" className="form-label">Start Date:</label> {/* Bootstrap form label */}
+      <div className="row mb-3">
+        <div className="col-md-6">
+          <div className="form-group">
+            <label htmlFor="startDate">Start Date:</label>
             <DatePicker
               id="startDate"
               value={startDate}
               onChange={(date) => setStartDate(date as Date)}
               maxDate={endDate}
-              className="form-control" // Basic form control styling - might need custom styling for react-date-picker
+              className="form-control"
             />
           </div>
         </div>
         <div className="col-md-6">
           <div className="form-group">
-            <label htmlFor="endDate" className="form-label">End Date:</label>
+            <label htmlFor="endDate">End Date:</label>
             <DatePicker
               id="endDate"
               value={endDate}
               onChange={(date) => setEndDate(date as Date)}
               minDate={startDate}
               maxDate={new Date()}
-              className="form-control" // Basic form control styling - might need custom styling for react-date-picker
+              className="form-control"
             />
           </div>
         </div>
       </div>
 
-      {/* Button is kept for manual refresh if needed, or can be removed if auto-update is sufficient */}
-      <button onClick={() => { fetchWords(); fetchFreqForWordCloud(); }} disabled={loading} className="btn btn-primary mb-3 " style={{display: 'flex'}}> {/* Bootstrap button styling and margin */}
-        {loading ? "Fetching..." : "Fetch Words"}
+      <button onClick={() => { fetchWords(); fetchFreqForWordCloud(); fetchFuzzyMatches(); }} disabled={loading} className="btn btn-primary mb-3">
+        {loading ? "Fetching..." : "Fetch Data"}
       </button>
 
-      {error && <div className="alert alert-danger">{error}</div>} {/* Bootstrap error alert */}
+      {error && <div className="alert alert-danger">{error}</div>}
 
-      <h2 className="mt-3">Words:</h2> {/* Top margin for spacing */}
+      <h2>Words:</h2>
       {words.length > 0 ? (
-        <p className="border p-3 rounded"> {/* Added border, padding, and rounded corners for word list */}
+        <p className="border p-3 rounded">
           {words.map((word, index) => (
-            <span key={index} className="badge bg-secondary me-1">{word} </span> // Display each word as a badge with margin
+            <span key={index} className="badge bg-secondary me-1">{word}</span>
           ))}
         </p>
       ) : (
         <p>No words found for the selected period.</p>
       )}
-      <h2 className="mt-3">Word Cloud:</h2> {/* Top margin for spacing */}
+
+      <h2>Word Cloud:</h2>
       {wordCloud.length > 0 ? (
-        <div className="border p-3 rounded d-flex justify-content-center"> {/* Container for word cloud with border, padding, rounded corners and centering */}
+        <div className="border p-3 rounded d-flex justify-content-center">
           <Wordcloud
             width={600}
             height={400}
             words={wordCloud}
-            fontSize={(word) => Math.sqrt(word.value) * 20} // Adjust font scaling as needed
+            fontSize={(word) => Math.sqrt(word.value) * 20}
             padding={5}
           >
             {(cloudWords) =>
               cloudWords.map((w, i) => (
-                  <text
+                <text
                   key={i}
                   style={{
                     fontSize: `${w.size}px`,
@@ -145,9 +261,9 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
                   }}
                   textAnchor="middle"
                   transform={`translate(${w.x}, ${w.y}) rotate(${w.rotate})`}
-                  >
+                >
                   {w.text}
-                  </text>
+                </text>
               ))
             }
           </Wordcloud>
@@ -156,8 +272,26 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
         <p>No word cloud data found for the selected period.</p>
       )}
 
+      <h2>Fuzzy Matches:</h2>
+      <ul className="list-group">
+        {fuzzyMatches.map((match, index) => (
+          <li ref={index === fuzzyMatches.length - 1 ? lastMatchElementRef : undefined} key={index} className="list-group-item">
+            <p><strong>Timestamp:</strong> {new Date(match.timestamp).toLocaleString()}</p>
+            <p><strong>User:</strong> {match.userId}</p>
+            <p><strong>Flagged Word:</strong> {match.flaggedWord}</p>
+            {match.flagged_word_similar_to && (
+              <p><strong>Similar to:</strong> {match.flagged_word_similar_to}</p>
+            )}
+            {match.screenshot_url && (
+              <img src={match.screenshot_url} alt={`Screenshot for ${match.flaggedWord}`} className="img-fluid" />
+            )}
+          </li>
+        ))}
+        {loadingFuzzyMatches && <li className="list-group-item">Loading more...</li>}
+        {!hasMore && <li className="list-group-item">No more matches to load.</li>}
+      </ul>
     </div>
   );
-}
+};
 
 export default KeylogWords;
