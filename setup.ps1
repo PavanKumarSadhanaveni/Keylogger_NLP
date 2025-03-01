@@ -133,6 +133,72 @@ MASTER_KEY=default_master_key_please_change_this
     Write-Host "Created .env file. Please update the MASTER_KEY value for security."
 }
 
+# --- Configure Email Settings and Store in MongoDB ---
+Write-Host ""
+Write-Host "--- Email Configuration ---"
+
+$senderEmail = Read-Host "Enter your sender email address (for sending emails)"
+$senderPassword = Read-Host -AsSecureString "Enter your sender email password/app password" | ConvertFrom-SecureString
+$recipientEmail = Read-Host "Enter the recipient email address (where you want to receive emails)"
+
+Write-Host "Storing email settings in MongoDB..."
+
+# Construct Python script to insert email settings into MongoDB
+$pythonScript = @"
+import os
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
+
+mongo_uri = os.getenv("MONGO_URI")
+if not mongo_uri:
+    mongo_uri = "mongodb://localhost:27017/" # Default if not in .env
+
+client = MongoClient(mongo_uri)
+db = client.get_database() # Uses default database 'test' or database from URI
+settings_collection = db.settings
+
+email_settings = {
+    "sender_email": "$senderEmail",
+    "sender_password": "$senderPassword",
+    "recipient_email": "$recipientEmail",
+    "smtp_server": "smtp.gmail.com", # Default SMTP server
+    "smtp_port": 587 # Default SMTP port
+}
+
+# Update or insert settings
+settings_collection.update_one({}, {"\$set": email_settings}, upsert=True)
+
+print("Email settings stored in MongoDB.")
+
+client.close()
+"@
+
+# Execute the Python script
+$pythonScriptPath = "store_email_settings.py"
+$pythonScript | Out-File -FilePath $pythonScriptPath -Encoding utf8
+
+# Get current Python executable path (works with venv/conda) - reuse logic from earlier
+$pythonPath = & {
+    if ($env:VIRTUAL_ENV) {
+        Join-Path -Path $env:VIRTUAL_ENV -ChildPath "Scripts\python.exe"
+    }
+    elseif ($env:CONDA_PREFIX) {
+        Join-Path -Path $env:CONDA_PREFIX -ChildPath "python.exe"
+    }
+    else {
+        "python"
+    }
+}
+
+& $pythonPath $pythonScriptPath
+Remove-Item $pythonScriptPath # Clean up the temporary script
+
+Write-Host "Email settings configured and stored in MongoDB."
+Write-Host ""
+Write-Host "IMPORTANT: Do not change the MASTER_KEY after initial setup as it is used for encryption and changing it will make previously encrypted data unreadable."
+
 # --- Final Instructions ---
 Set-Location -Path ".."
 

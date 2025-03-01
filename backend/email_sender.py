@@ -18,10 +18,11 @@ def send_email(recipient_email: str, subject: str, body: str, image_data: Option
 
     sender_email = settings.get("sender_email")
     sender_password = settings.get("sender_password")
-    smtp_server = settings.get("smtp_server", "smtp.gmail.com")
-    smtp_port = int(settings.get("smtp_port", 587))
+    smtp_server = settings.get("smtp_server") # Get from DB, no default here
+    smtp_port = int(settings.get("smtp_port")) # Get from DB, no default here
+    recipient_email = settings.get("recipient_email", recipient_email) # Get recipient email from settings, default to function argument if not found
 
-    if not all([sender_email, sender_password, smtp_server, smtp_port]):
+    if not all([sender_email, sender_password, smtp_server, smtp_port, recipient_email]):
         logging.error("Email configuration is incomplete in the database.")
         return
 

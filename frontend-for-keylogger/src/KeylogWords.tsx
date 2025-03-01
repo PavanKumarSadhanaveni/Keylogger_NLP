@@ -118,9 +118,15 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
         }
       });
 
-      const decryptedWords = response.data.map((word: string) =>
-        decryptData(word, encryptionKey)
-      );
+      const decryptedWords = response.data.map((word: string) => {
+        try {
+          return decryptData(word, encryptionKey);
+        } catch (e) {
+          setError("Decryption error. Please check your passphrase and try again.");
+          console.error("Decryption error:", e);
+          return ""; // Return empty string or handle as needed
+        }
+      });
       setWords(decryptedWords);
 
     } catch (err: any) {
@@ -157,10 +163,18 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
           'X-Passphrase': passphrase,
         }
       });
-      const decryptedWordCloud = response.data.map((word: any) => ({
-        text: decryptData(word.text, encryptionKey),
-        value: word.value,
-      }));
+      const decryptedWordCloud = response.data.map((word: any) => {
+        try {
+          return {
+            text: decryptData(word.text, encryptionKey),
+            value: word.value,
+          };
+        } catch (e) {
+          setError("Decryption error. Please check your passphrase and try again.");
+          console.error("Decryption error:", e);
+          return { text: "", value: 0 }; // Return default or handle as needed
+        }
+      });
 
       setWordCloud(decryptedWordCloud);
     } catch (err: any) {
@@ -208,15 +222,30 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
       }
 
       setFuzzyMatches(prevMatches => {
-        const decryptedNewMatches = newMatches.map(match => ({
-          ...match,
-          timestamp:match.timestamp,
-          userId: decryptData(match.userId, encryptionKey,), // Decrypt userId here
-          flaggedWord: decryptData(match.flaggedWord, encryptionKey,),
-          flagged_word_similar_to: match.flagged_word_similar_to ? decryptData(match.flagged_word_similar_to, encryptionKey,) : null,
-          category: match.category ? decryptData(match.category, encryptionKey,) : null,
-          // screenshot_url is NOT encrypted, it's a URL
-        }));
+        const decryptedNewMatches = newMatches.map(match => {
+          try {
+            return {
+              ...match,
+              timestamp:match.timestamp,
+              userId: decryptData(match.userId, encryptionKey,), // Decrypt userId here
+              flaggedWord: decryptData(match.flaggedWord, encryptionKey,),
+              flagged_word_similar_to: match.flagged_word_similar_to ? decryptData(match.flagged_word_similar_to, encryptionKey,) : null,
+              category: match.category ? decryptData(match.category, encryptionKey,) : null,
+              // screenshot_url is NOT encrypted, it's a URL
+            };
+          } catch (e) {
+            setError("Decryption error. Please check your passphrase and try again.");
+            console.error("Decryption error:", e);
+            return { // Return a default object or handle as needed to avoid breaking the map
+              timestamp: match.timestamp,
+              userId: 'Decryption Failed',
+              flaggedWord: 'Decryption Failed',
+              flagged_word_similar_to: 'Decryption Failed',
+              category: 'Decryption Failed',
+              screenshot_url: null,
+            };
+          }
+        });
 
         const allMatches = [...prevMatches, ...decryptedNewMatches];
         const uniqueMatchesMap = new Map(allMatches.map(match => [match.timestamp, match]));
@@ -244,11 +273,21 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
       console.log("Received SSE event:", data);
 
       if (encryptionKey) {
-        // Decrypt userId in SSE event
-        const decryptedUserId = decryptData(data.userId, encryptionKey);
+        let decryptedUserId;
+        let decryptedFlaggedWord;
+        try {
+          // Decrypt userId in SSE event
+          decryptedUserId = decryptData(data.userId, encryptionKey);
+          decryptedFlaggedWord = decryptData(data.flaggedWord, encryptionKey);
+        } catch (e) {
+          setError("Decryption error in SSE. Please check your passphrase.");
+          console.error("SSE Decryption error:", e);
+          return; // Exit if decryption fails
+        }
+
 
         if (Notification.permission === 'granted') {
-          const notificationTitle = `Offensive word detected: ${data.flaggedWord}`;
+          const notificationTitle = `Offensive word detected: ${decryptedFlaggedWord}`;
           const notificationOptions = {
             body: `User: ${decryptedUserId}\nClick to view.`, // Use decrypted userId
             data: { url: "/" },
@@ -286,7 +325,15 @@ const KeylogWords: React.FC<KeylogWordsProps> = () => {
         });
         if (encryptionKey) {
           // Decrypt userIds received from backend
-          const decryptedUserIds = response.data.map((userId: string) => decryptData(userId, encryptionKey));
+          const decryptedUserIds = response.data.map((userId: string) => {
+            try {
+              return decryptData(userId, encryptionKey);
+            } catch (e) {
+              setError("Decryption error. Please check your passphrase and try again.");
+              console.error("Decryption error:", e);
+              return 'Decryption Failed'; // Or handle differently if decryption fails
+            }
+          });
           setAvailableUserIds(decryptedUserIds);
         } else {
           console.warn("Encryption key not available, cannot decrypt user IDs.");

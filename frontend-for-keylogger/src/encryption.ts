@@ -30,6 +30,6 @@ export const decryptData = (encryptedData: string, key: CryptoJS.lib.WordArray) 
         return decrypted.toString(CryptoJS.enc.Utf8);
     } catch (error) {
         console.error("Decryption error:", error);
-        return ""; // Or handle error as needed
+        throw error; // Or handle error as needed
     }
 }; 

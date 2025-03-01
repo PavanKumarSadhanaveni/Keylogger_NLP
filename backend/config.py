@@ -23,25 +23,19 @@ def get_db():
         raise
 
 def get_settings(db):
-    """Retrieves email settings from the database.  Creates default settings if they don't exist."""
-    settings_collection = db[SETTINGS_COLLECTION_NAME]
-    settings = settings_collection.find_one({"_id": "email_settings"})
+    """
+    Retrieves settings from the database.
+    """
+    settings_collection = db.settings
+    settings_doc = settings_collection.find_one() # Assuming settings are in a single document
 
-    if not settings:
-        # Default settings (you might want to adjust these)
-        default_settings = {
-            "_id": "email_settings",
-            "sender_email": "",
-            "sender_password": "",
-            "smtp_server": "smtp.gmail.com",  # Default to Gmail
-            "smtp_port": 587,  # Default to Gmail's TLS port
-            "recipient_email": ""
-        }
-        settings_collection.insert_one(default_settings)
-        settings = default_settings
-        logging.info("Created default email settings.")
-
-    return settings
+    if settings_doc:
+        # Remove the _id field if it exists before returning
+        settings_doc.pop('_id', None)
+        return settings_doc
+    else:
+        logging.warning("No settings found in the database. Using default settings.")
+        return {} # Return empty dict if no settings found, and let individual functions handle defaults
 
 def update_settings(db, new_settings):
     """Updates email settings in the database."""
