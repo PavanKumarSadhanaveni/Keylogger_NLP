@@ -78,15 +78,60 @@ if ($service -and $service.Status -ne "Running") {
     }
 }
 
-# --- Install Python Modules in a New Window ---
+# --- Install Python Modules using current Python environment ---
 Set-Location -Path "backend"
-Write-Host "Installing Python dependencies in a new window..."
-Start-Process -FilePath "powershell.exe" -ArgumentList "-Command", "python -m pip install pynput pymongo Flask python-dotenv flask_cors bson" -WindowStyle Normal
+Write-Host "Installing Python dependencies from requirements.txt in the current Python environment..."
 
-# --- Install Node Modules in a New Window ---
+# Get current Python executable path (works with venv/conda)
+$pythonPath = & {
+    # Try to detect if we're in a virtual environment
+    if ($env:VIRTUAL_ENV) {
+        # We're in a venv
+        Join-Path -Path $env:VIRTUAL_ENV -ChildPath "Scripts\python.exe"
+    }
+    elseif ($env:CONDA_PREFIX) {
+        # We're in a conda environment
+        Join-Path -Path $env:CONDA_PREFIX -ChildPath "python.exe"
+    }
+    else {
+        # Use system Python
+        "python"
+    }
+}
+
+Write-Host "Using Python interpreter: $pythonPath"
+
+# Install dependencies using requirements.txt
+& $pythonPath -m pip install -r requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to install Python dependencies from requirements.txt. Please check the error messages above and ensure requirements.txt exists."
+    exit 1
+}
+
+Write-Host "Python dependencies installed successfully from requirements.txt."
+
+# --- Install Node Modules ---
 Set-Location -Path "..\frontend-for-keylogger"
-Write-Host "Installing Node.js dependencies in a new window..."
-Start-Process -FilePath "cmd.exe" -ArgumentList "/c start cmd /k npm install" -WindowStyle Normal
+Write-Host "Installing Node.js dependencies..."
+
+npm install
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to install Node.js dependencies. Exit code: $($LASTEXITCODE)"
+    exit 1
+} else {
+    Write-Host "Node.js dependencies installed successfully."
+}
+
+# --- Create .env file for backend if it doesn't exist ---
+Set-Location -Path "..\backend"
+if (-not (Test-Path ".env")) {
+    Write-Host "Creating .env file with default values..."
+    @"
+MONGO_URI=mongodb://localhost:27017/
+MASTER_KEY=default_master_key_please_change_this
+"@ | Out-File -FilePath ".env" -Encoding utf8
+    Write-Host "Created .env file. Please update the MASTER_KEY value for security."
+}
 
 # --- Final Instructions ---
 Set-Location -Path ".."
@@ -107,3 +152,5 @@ Write-Host "   PS > python -u .\backend\app.py"
 Write-Host ""
 Write-Host "Make sure MongoDB server is running before starting the keylogger and API."
 Write-Host "To check: Get-Service | Where-Object {$_.Name -like '*Mongo*'}"
+Write-Host ""
+Write-Host "IMPORTANT: Update the MASTER_KEY in the backend/.env file before using the application."
